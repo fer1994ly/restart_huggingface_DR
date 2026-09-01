@@ -32,7 +32,8 @@ jobs:
           python - <<'PY'
           import os
           import sys
-          import requests
+          import urllib.error
+          import urllib.request
           from huggingface_hub import HfApi
 
           token = os.environ.get("HF_TOKEN")
@@ -46,11 +47,18 @@ jobs:
 
           # Una peticion HTTP cuenta como "visita" y reinicia el contador de inactividad
           # (cpu-basic duerme tras 48h sin visitas). Esto es lo que evita que se duerma.
+          # Se usa urllib (stdlib) a proposito: huggingface_hub ya no depende de requests
+          # (desde la v1 usa httpx), asi que un GET sin dependencias extra no se rompe.
           def ping():
+              req = urllib.request.Request(space_url, headers={"User-Agent": "keep-alive-bot"})
               try:
-                  r = requests.get(space_url, timeout=60)
-                  print(f"Ping a {space_url} -> HTTP {r.status_code}")
-                  return r.status_code
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      print(f"Ping a {space_url} -> HTTP {r.status}")
+                      return r.status
+              except urllib.error.HTTPError as e:
+                  # Una respuesta de error sigue contando como visita para el contador de HF
+                  print(f"Ping a {space_url} -> HTTP {e.code}")
+                  return e.code
               except Exception as e:
                   print(f"Ping a {space_url} fallo: {e}")
                   return None
