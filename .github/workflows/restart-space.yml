@@ -1,0 +1,66 @@
+name: Restart Hugging Face Space
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"  # cada 30 minutos revisa el estado del Space
+  workflow_dispatch:
+
+# Evita que dos ejecuciones se solapen y reinicien el Space dos veces
+concurrency:
+  group: restart-space
+  cancel-in-progress: false
+
+jobs:
+  restart-space:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Hugging Face Hub
+        run: pip install huggingface_hub
+
+      - name: Restart Space if down
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SPACE_ID: ferferefer/DR
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from huggingface_hub import HfApi
+
+          token = os.environ.get("HF_TOKEN")
+          if not token:
+              print("ERROR: el secreto HF_TOKEN no esta configurado en el repo.")
+              sys.exit(1)
+
+          api = HfApi(token=token)
+          repo_id = os.environ["SPACE_ID"]
+
+          # Estados que consideramos "arriba y funcionando"
+          HEALTHY = {"RUNNING", "RUNNING_BUILDING", "BUILDING", "RUNNING_APP_STARTING", "APP_STARTING"}
+
+          try:
+              runtime = api.get_space_runtime(repo_id)
+              stage = runtime.stage
+              print(f"Estado actual del Space: {stage}")
+          except Exception as e:
+              print(f"ERROR al consultar el estado de {repo_id}: {e}")
+              sys.exit(1)
+
+          if stage in HEALTHY:
+              print("El Space esta funcionando. No hace falta reiniciar.")
+              sys.exit(0)
+
+          print(f"El Space esta caido/dormido ({stage}). Reiniciando...")
+          try:
+              api.restart_space(repo_id=repo_id)
+              print(f"Space {repo_id} reiniciado correctamente")
+          except Exception as e:
+              print(f"ERROR al reiniciar {repo_id}: {e}")
+              sys.exit(1)
+          PY
