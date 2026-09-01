@@ -1,17 +1,17 @@
-name: Restart Hugging Face Space
+name: Keep Hugging Face Space Alive
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # cada 30 minutos revisa el estado del Space
+    - cron: "*/30 * * * *"  # cada 30 minutos: visita el Space y revisa su estado
   workflow_dispatch:
 
-# Evita que dos ejecuciones se solapen y reinicien el Space dos veces
+# Evita que dos ejecuciones se solapen
 concurrency:
-  group: restart-space
+  group: keep-space-alive
   cancel-in-progress: false
 
 jobs:
-  restart-space:
+  keep-alive:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,14 +23,16 @@ jobs:
       - name: Install Hugging Face Hub
         run: pip install huggingface_hub
 
-      - name: Restart Space if down
+      - name: Ping the Space and restart it only if it is broken
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           SPACE_ID: ferferefer/DR
+          SPACE_URL: https://ferferefer-dr.hf.space/
         run: |
           python - <<'PY'
           import os
           import sys
+          import requests
           from huggingface_hub import HfApi
 
           token = os.environ.get("HF_TOKEN")
@@ -38,25 +40,48 @@ jobs:
               print("ERROR: el secreto HF_TOKEN no esta configurado en el repo.")
               sys.exit(1)
 
-          api = HfApi(token=token)
           repo_id = os.environ["SPACE_ID"]
+          space_url = os.environ["SPACE_URL"]
+          api = HfApi(token=token)
 
-          # Estados que consideramos "arriba y funcionando"
-          HEALTHY = {"RUNNING", "RUNNING_BUILDING", "BUILDING", "RUNNING_APP_STARTING", "APP_STARTING"}
+          # Una peticion HTTP cuenta como "visita" y reinicia el contador de inactividad
+          # (cpu-basic duerme tras 48h sin visitas). Esto es lo que evita que se duerma.
+          def ping():
+              try:
+                  r = requests.get(space_url, timeout=60)
+                  print(f"Ping a {space_url} -> HTTP {r.status_code}")
+                  return r.status_code
+              except Exception as e:
+                  print(f"Ping a {space_url} fallo: {e}")
+                  return None
+
+          # Estados en los que el Space ya esta arriba o levantandose
+          HEALTHY = {"RUNNING", "RUNNING_BUILDING", "RUNNING_APP_STARTING", "BUILDING", "APP_STARTING"}
+          # Estados en los que basta una visita para despertarlo
+          WAKEABLE = {"SLEEPING", "STOPPED"}
 
           try:
-              runtime = api.get_space_runtime(repo_id)
-              stage = runtime.stage
+              stage = api.get_space_runtime(repo_id).stage
               print(f"Estado actual del Space: {stage}")
           except Exception as e:
               print(f"ERROR al consultar el estado de {repo_id}: {e}")
               sys.exit(1)
 
           if stage in HEALTHY:
-              print("El Space esta funcionando. No hace falta reiniciar.")
+              # Camino normal: solo lo visitamos para que no llegue a dormirse nunca.
+              ping()
+              print("El Space esta funcionando y su contador de inactividad se ha reiniciado.")
               sys.exit(0)
 
-          print(f"El Space esta caido/dormido ({stage}). Reiniciando...")
+          if stage in WAKEABLE:
+              # Despertar con una visita es mas barato y rapido que un restart completo.
+              print(f"El Space esta dormido ({stage}). Despertandolo con una visita...")
+              ping()
+              print("Visita enviada; el Space deberia estar arrancando.")
+              sys.exit(0)
+
+          # PAUSED / RUNTIME_ERROR / BUILD_ERROR: una visita no lo arregla, hay que reiniciar.
+          print(f"El Space esta caido ({stage}). Reiniciando via API...")
           try:
               api.restart_space(repo_id=repo_id)
               print(f"Space {repo_id} reiniciado correctamente")
